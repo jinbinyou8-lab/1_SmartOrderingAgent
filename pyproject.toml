@@ -1,0 +1,31 @@
+[project]
+name = "smartorderingagent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "yjb", email = "3335612774@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "dotenv>=0.9.9",
+    "fastapi>=0.141.1",
+    "langchain>=1.4.0",
+    "langchain-deepseek>=1.1.0",
+    "langchain-huggingface>=1.2.2",
+    "langchain-mcp-adapters>=0.3.2",
+    "langgraph-checkpoint>=4.2.0",
+    "langgraph-checkpoint-sqlite>=3.1.1",
+    "pymilvus>=3.0.1",
+    "pymysql>=1.2.0",
+    "redis>=8.1.0",
+    "sentence-transformers>=6.0.1",
+    "sqlalchemy>=2.0.52",
+]
+
+[project.scripts]
+smartorderingagent = "smartorderingagent:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"

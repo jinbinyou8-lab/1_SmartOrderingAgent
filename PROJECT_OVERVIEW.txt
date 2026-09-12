@@ -1,0 +1,307 @@
+SmartOrderingAgent 项目结构与调用流程说明
+=========================================
+
+一、项目一句话
+--------------
+
+这是一个“智能餐厅助手”Demo，包含：
+
+- Vue 前端页面
+- FastAPI 后端接口
+- DeepSeek + LangChain Agent
+- MySQL：菜品、预订数据
+- Redis：FAQ 问答
+- Milvus：菜品语义向量检索
+- SQLite：Agent 对话记忆
+- 高德地图等外部 MCP 工具
+
+核心入口是 run.py。后端代码集中在 api/main.py，Agent 代码集中在
+agent/langchain_assitant.py。
+
+
+二、项目结构
+------------
+
+F:\SmartOrderingAgent
+├─ run.py                        后端启动入口，启动 FastAPI:8000
+├─ .env                          数据库、Redis、Milvus、LLM 配置
+├─ pyproject.toml                Python 依赖
+├─ menu.sql                      MySQL 建表和初始数据
+├─ checkpoint.db                 Agent 对话记忆数据库
+├─ src/smartorderingagent        项目包，目前网页流程基本未使用
+├─ api/
+│  └─ main.py                    FastAPI 接口和 Pydantic 响应模型
+├─ agent/
+│  ├─ langchain_assitant.py      Agent、工具、大模型、记忆
+│  ├─ redis_data_sync.py         把 FAQ 写入 Redis
+│  ├─ milvus_data_sync.py        把菜单向量写入 Milvus
+│  ├─ redis_demo.py              Redis 学习示例
+│  └─ prompts/system_prompt.txt  餐厅助手系统提示词
+└─ ui/
+   ├─ src/App.vue                页面、聊天、菜单、预订逻辑
+   ├─ src/api/index.js           Axios/Fetch API 封装
+   └─ vite.config.js             前端 3000，代理 /api 到后端 8000
+
+
+三、启动顺序
+------------
+
+1. 启动 MySQL，执行 menu.sql，得到 menu_items 和 reservation_order 两张表。
+
+2. 启动 Redis，运行 agent/redis_data_sync.py，把 FAQ 写入 Redis。
+
+3. 启动 Milvus，运行 agent/milvus_data_sync.py，把菜单数据向量写入 Milvus。
+
+4. 启动后端：
+
+   cd F:\SmartOrderingAgent
+   .\.venv\Scripts\python.exe run.py
+
+5. 启动前端：
+
+   cd F:\SmartOrderingAgent\ui
+   npm run dev
+
+6. 浏览器访问：
+
+   http://localhost:3000
+
+
+四、前端到后端的调用链
+----------------------
+
+浏览器先加载 ui/index.html，再加载 ui/src/main.js，最终挂载
+ui/src/App.vue。
+
+前端请求都走：
+
+   /api/xxx
+       ↓ Vite 代理，删除 /api
+   http://127.0.0.1:8000/xxx
+
+代理配置在 ui/vite.config.js。
+Axios 和 Fetch 请求封装在 ui/src/api/index.js。
+
+
+五、菜单流程
+------------
+
+页面加载时，App.vue 中的 onMounted() 会调用 loadMenuItems()：
+
+   App.vue
+     -> menuAPI.getMenuList()
+     -> GET /api/menu/list
+     -> Vite 转发到 GET /menu/list
+     -> api/main.py 中的 menu_list()
+     -> msql_connnection() 获取 SQLAlchemy 连接池
+     -> 查询 MySQL menu.menu_items
+     -> 每行转换成 MenuItem
+     -> 返回 MenuListResponse JSON
+     -> Vue 保存到 menuItems
+     -> 渲染菜品卡片
+
+返回数据大致是：
+
+   {
+     "success": true,
+     "menu_items": [
+       {
+         "id": 1,
+         "dish_name": "宫保鸡丁",
+         "formatted_price": "¥28.00",
+         "spice_text": "中辣",
+         "is_vegetarian": false
+       }
+     ],
+     "count": 5,
+     "message": "success"
+   }
+
+
+六、预订列表流程
+----------------
+
+   App.vue: loadReservations()
+     -> GET /api/reservation/list
+     -> FastAPI reservation_list()
+     -> MySQL reservation_order
+     -> 每行转换成 ReservationItem
+     -> 返回 JSON
+     -> 前端显示预订卡片
+
+注意：这里的 /reservation/list 只是查询预订。
+
+真正创建预订是聊天中的 Agent 工具 make_reservation()。
+
+
+七、FAQ 流程
+------------
+
+FAQ 是一套独立的快速问答流程，不经过大模型。
+
+1. 初始化阶段，agent/redis_data_sync.py 把 FAQ 写入 Redis：
+
+   faq:items:address   -> Hash(question, answer)
+   faq:items:phone     -> Hash(question, answer)
+   faq:items:work_time -> Hash(question, answer)
+   faq:all_items       -> Set(address, phone, work_time)
+
+2. 用户在输入框输入至少 2 个字符。
+
+3. 前端等待 220ms 防抖，然后请求：
+
+   GET /api/faq/suggest?query=地址&limit=6
+
+4. 后端 _load_faq_items_from_redis()：
+
+   - 从 faq:all_items 取所有 key
+   - 用 Pipeline 批量执行 HGETALL
+   - 构造 FaqItem
+
+5. _get_similarity_score() 计算相似度：
+
+   0.6 × SequenceMatcher + 0.4 × Jaccard
+
+6. 按分数排序，截取 Top K，返回 FAQResponse。
+
+7. 前端显示“您可能想问”。
+
+8. 用户点击建议后，直接把预设问题和答案插入聊天窗口，不再调用 /chat。
+
+
+八、普通聊天与 Agent 流程
+-------------------------
+
+   App.vue: sendChatQuery()
+     -> fetch POST /api/chat
+     -> ChatRequest {"query": "推荐不辣的菜"}
+     -> FastAPI chat_endpoint()
+     -> StreamingResponse(assistant_query(query))
+     -> Agent 判断是否需要调用工具
+     -> DeepSeek 生成答案
+     -> SSE 逐块返回 data: {"type":"token","content":"..."}
+     -> 前端逐块追加到聊天气泡
+
+create_agent() 会组合：
+
+- DeepSeek：负责理解问题和决定调用工具。
+- search_main_dishes：从 MySQL 查询特色菜。
+- user_flavor_search：BGE-M3 向量化后查询 Milvus。
+- make_reservation：向 MySQL 插入预订记录。
+- MCP 工具：例如高德地图服务。
+- system_prompt.txt：规定只回答餐厅问题、不能捏造信息、预订前二次确认。
+- SQLite Checkpointer：保存对话历史。
+
+
+九、Agent 工具的数据流
+----------------------
+
+1. search_main_dishes()
+
+   Agent
+     -> 查询 MySQL menu.menu_items
+     -> 筛选 is_featured = 1
+     -> 把英文字段名转换成中文
+     -> 返回特色菜列表给大模型
+
+2. user_flavor_search()
+
+   Agent
+     -> 使用 BGE-M3 把用户问题转成 1024 维向量
+     -> 查询 Milvus menu_items 集合
+     -> 搜索最相似的 3 条菜品文本
+     -> 返回给大模型
+
+3. make_reservation()
+
+   Agent
+     -> 收集人数、儿童数、到达时间、座位偏好、主菜偏好、备注
+     -> 与用户二次确认
+     -> INSERT INTO reservation_order
+     -> COMMIT
+     -> 返回“预定成功”
+
+4. MCP 工具
+
+   Agent
+     -> 调用外部 MCP 服务
+     -> 获取地图等外部数据
+     -> 把结果返回给大模型
+
+
+十、各存储的职责
+----------------
+
+MySQL
+
+- menu_items：菜品数据
+- reservation_order：预订数据
+
+Redis
+
+- faq:items:*：每条 FAQ 的 Hash
+- faq:all_items：所有 FAQ key 的 Set
+
+Milvus
+
+- menu_items：菜品文本和向量
+- vector 字段：1024 维 BGE-M3 向量
+- text 字段：拼接后的菜单文字
+
+SQLite
+
+- checkpoint.db：LangGraph Agent 的对话检查点和记忆
+
+
+十一、当前需要注意的问题
+------------------------
+
+1. /chat 要真正工作，需要正确配置 DeepSeek Key。
+   当前 .env 中 LLM_API_KEY 为空，而且代码没有显式传给 ChatDeepSeek。
+
+2. 前端封装的 /delivery 和 /health 后端目前没有对应路由。
+
+3. Agent 的 thread_id 固定为 "123"，所有用户会共用同一份对话记忆。
+
+4. FAQ 没有最低分数阈值，即使问题完全不相关，也会返回排序第一名。
+
+5. agent/milvus_data_sync.py 中写死了：
+
+   F:\SmartOrderingAgent\models\bge-m3
+
+   换到其他电脑或目录后需要修改。
+
+6. agent/redis_data_sync.py 目前每处理一条 FAQ 就执行一次 Pipeline。
+   功能正常，但真正的批量写法应在循环结束后统一执行 execute()。
+
+7. Agent 当前通过 SSE 只发送 token 类型的数据。
+   前端虽然支持 recommendation 和 add_to_cart 等事件，但后端还没有发送这些事件。
+
+
+十二、最重要的一条调用主线
+--------------------------
+
+   用户输入问题
+     -> Vue App.vue
+     -> /api/chat
+     -> FastAPI /chat
+     -> assistant_query()
+     -> create_agent()
+     -> DeepSeek 决定回答或调用工具
+     -> MySQL / Milvus / MCP / Redis
+     -> 工具结果返回 Agent
+     -> DeepSeek 生成最终回答
+     -> FastAPI 通过 SSE 流式返回
+     -> Vue 分块显示回答
+
+FAQ 的调用主线：
+
+   用户输入问题
+     -> Vue 监听输入框
+     -> /api/faq/suggest
+     -> FastAPI /faq/suggest
+     -> Redis 读取 FAQ
+     -> 字符串相似度排序
+     -> 返回 Top K
+     -> 前端显示建议按钮
+     -> 点击后直接展示预设答案

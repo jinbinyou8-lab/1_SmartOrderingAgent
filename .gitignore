@@ -1,0 +1,40 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+.venv/
+
+# Frontend dependencies and build output
+ui/node_modules/
+ui/dist/
+
+# Local model files
+models/
+
+# Agent conversation data
+checkpoint.db
+checkpoint.db-shm
+checkpoint.db-wal
+
+# Database snapshots and archives
+*.rdb
+*.aof
+*.sql.gz
+*.tar.gz
+*.zip
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
